@@ -1,0 +1,11 @@
+{
+  "http": "198.51.100.10:80",
+  "stun": "198.51.100.20:3478",
+  "mappings": [
+    {
+      "local_port": 10001,
+      "target": "192.168.2.10:0",
+      "script": "/absolute/path/PunchHole/scripts/qbittorrent-set-port.sh"
+    }
+  ]
+}
