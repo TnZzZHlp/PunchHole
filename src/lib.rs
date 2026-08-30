@@ -6,26 +6,21 @@ use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 
 mod cli;
 mod config;
-mod forward;
 mod http;
+mod mapping;
 mod net;
 mod notify;
 mod stun;
 
 use clap::{CommandFactory, Parser};
 
-pub use config::{
-    Config, Mapping, Target, TargetPort, load_json_config, parse_config, parse_ipv4_endpoint,
-    parse_target_endpoint,
-};
-#[doc(hidden)]
-pub use forward::forward_client;
+pub use config::{Config, Mapping, load_json_config, parse_ipv4_endpoint};
 #[doc(hidden)]
 pub use http::{connect_http, validate_http_response};
 #[doc(hidden)]
 pub use net::new_bound_socket;
 #[doc(hidden)]
-pub use notify::{NotificationQueue, script_arguments};
+pub use notify::script_arguments;
 #[doc(hidden)]
 pub use stun::{
     STUN_BINDING_SUCCESS, STUN_MAGIC_COOKIE, XOR_MAPPED_ADDRESS, parse_xor_mapped_address,
@@ -54,7 +49,7 @@ pub fn run() {
             .exit(),
     };
 
-    forward::run(config);
+    mapping::run(config);
 }
 
 /// Parses CLI arguments without starting mapping workers.

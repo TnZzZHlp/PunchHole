@@ -2,22 +2,24 @@
 
 ## Overview
 
-PunchHole is a Rust 2024 command-line service for maintaining multiple direct IPv4 TCP mappings behind a full-cone/NAT1 router. It uses the same local port for an HTTP keepalive connection, a TCP STUN request, and the forwarding listener. It is direct-only: there is no TURN, relay, UDP/uTP forwarding, CGNAT support, authentication, or ACL.
+PunchHole is a Rust 2024 command-line service for maintaining multiple direct IPv4 TCP mappings behind a full-cone/NAT1 router. It reuses the same local port for an HTTP keepalive connection and a TCP STUN request, then delegates data-plane forwarding to notification scripts. It is direct-only: there is no built-in payload proxy, TURN, relay, UDP/uTP forwarding, CGNAT support, authentication, or ACL.
 
 ## Repository map
 
 - `src/main.rs`: minimal binary entry point.
 - `src/lib.rs`: module wiring, tracing initialization, and public test-facing re-exports.
 - `src/cli.rs`: `clap` command-line definition.
-- `src/config.rs`: strict JSON/inline configuration parsing and mapping validation.
-- `src/net.rs`: reusable bound sockets and Linux accept-error classification.
+- `src/config.rs`: strict JSON-only configuration parsing and mapping validation.
+- `src/net.rs`: reusable same-port bound sockets and outbound TCP setup.
 - `src/http.rs`: persistent HTTP `HEAD` setup, strict response parsing, and keepalive loop.
 - `src/stun.rs`: TCP STUN request framing and strict IPv4 `XOR-MAPPED-ADDRESS` parsing.
-- `src/forward.rs`: mapping supervision, listeners, client limits, and bidirectional forwarding.
-- `src/notify.rs`: notification queue, retries, coalescing, script timeout, and Linux process-group cleanup.
+- `src/mapping.rs`: mapping supervision, notification, and steady HTTP keepalive lifecycle.
+- `src/notify.rs`: synchronous script execution, timeout, and Linux process-group cleanup.
 - `tests/`: integration tests grouped by module. Keep tests here; do not add inline test modules under `src/`.
 - `example.config.json`: strict JSON example using documentation-only endpoints and an absolute placeholder script path.
 - `scripts/qbittorrent-set-port.sh`: POSIX shell helper for qBittorrent WebAPI port updates.
+- `scripts/openwrt-nft-forward.sh`: privileged nftables DNAT setup and dynamic map updates.
+- `scripts/openwrt-qbittorrent-nft.sh`: combined qBittorrent update and OpenWrt DNAT notification script.
 
 ## Required commands
 
@@ -37,10 +39,10 @@ Before declaring any task complete, `cargo clippy-fix` is mandatory and must emi
 cargo clippy-fix
 ```
 
-Inspect any automatic fixes for networking, ownership, timeout, and lock-scope changes, then rerun formatting, tests, and strict Clippy. Do not hide failures with broad lint allowances. If the shell helper changes, also run:
+Inspect any automatic fixes for networking, ownership, timeout, and lock-scope changes, then rerun formatting, tests, and strict Clippy. Do not hide failures with broad lint allowances. If shell helpers change, also run:
 
 ```sh
-sh -n scripts/qbittorrent-set-port.sh
+sh -n scripts/*.sh
 ```
 
 ## Coding and testing conventions
@@ -55,19 +57,19 @@ sh -n scripts/qbittorrent-set-port.sh
 
 ## Protocol and behavior invariants
 
-- HTTP, STUN, and target endpoints accept IPv4 literals or DNS hostnames with a port. Hostnames resolve once at configuration load to the first IPv4 result; runtime networking remains IPv4-only. Local mapping ports are nonzero and unique.
-- `net::new_bound_socket` supplies the shared `SO_REUSEADDR`/`SO_REUSEPORT` behavior required by the same-local-port design; do not bypass it for HTTP, STUN, or listeners.
+- HTTP and STUN endpoints accept IPv4 literals or DNS hostnames with a port. Hostnames resolve once at configuration load to the first IPv4 result; runtime networking remains IPv4-only.
+- Each mapping obtains an OS-selected local port when it first establishes HTTP. That port remains fixed through retries for the process lifetime and is reused for HTTP and TCP STUN.
+- `net::new_bound_socket` supplies the shared `SO_REUSEADDR`/`SO_REUSEPORT` behavior required by the same-local-port design; do not bypass it for HTTP or STUN.
 - HTTP responses and STUN packets are intentionally strict and use absolute response deadlines. Preserve malformed-input rejection and TCP framing.
-- Target port `0` means the current public STUN-mapped port. For this dynamic mode, the notification script must succeed before clients are accepted.
-- Fixed-target notifications are asynchronous, retry failures, and coalesce pending changes to the newest value. Preserve queue liveness, lock/Condvar ordering, and worker cleanup.
-- Notification scripts are executed directly without a command shell and receive exactly five separate arguments: `PUBLIC_IP PUBLIC_PORT LOCAL_PORT TARGET_IP TARGET_PORT`.
-- Forwarding is TCP-only and must retain bidirectional half-close/error propagation, idle timeout handling, and the active-client cap.
-- Linux/OpenWrt accept errors and process handling are architecture-sensitive; use target-native `libc` constants rather than hardcoded errno numbers.
+- Notification scripts must succeed before steady keepalive. They execute directly without a shell and receive exactly three separate arguments: `PUBLIC_IP PUBLIC_PORT LOCAL_PORT`.
+- Rust code must not accept client connections or proxy payload traffic. Data-plane forwarding belongs in the configured script; the included OpenWrt path uses kernel nftables DNAT.
+- Linux/OpenWrt process handling is architecture-sensitive; use target-native `libc` constants rather than hardcoded errno numbers.
 
 ## Configuration and security
 
-- `--config PATH` conflicts with inline `--http`, `--stun`, and repeatable `--mapping` arguments.
-- JSON uses `http`, `stun`, and `mappings`; unknown fields are rejected. Mapping fields are `local_port` (with `local` alias), `target`, and an absolute `script` path. STUN endpoints must support TCP; successful UDP STUN probes are insufficient.
+- `--config PATH` is the only configuration form; inline HTTP, STUN, and mapping arguments are unsupported.
+- JSON uses `http`, `stun`, and `mappings`; unknown fields are rejected. Each mapping has exactly one absolute `script` path. STUN endpoints must support TCP; successful UDP STUN probes are insufficient.
 - Script existence/executability is checked when invoked, not while parsing configuration.
-- The qBittorrent helper requires `curl`, accepts `QBITTORRENT_URL`, and treats only HTTP 2xx as success. Its documented LAN no-auth assumption is safe only on a trusted LAN.
+- The qBittorrent helper requires `curl`, accepts `QBITTORRENT_URL`, optional `QBITTORRENT_LISTEN_PORT`, and optional `QBITTORRENT_ANNOUNCE_PORT`, and treats only HTTP 2xx as success. Its documented LAN no-auth assumption is safe only on a trusted LAN.
+- The OpenWrt DNAT helper requires `nft`, `flock`, and root or `CAP_NET_ADMIN`. Its target is script-controlled through `PUNCHHOLE_TARGET_IP` and `PUNCHHOLE_TARGET_PORT`; privileged service configuration and scripts must remain root-owned.
 - Public mappings have no built-in access control. Do not weaken validation, expose credentials, or imply support for NAT types and transports outside the documented scope.

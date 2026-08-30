@@ -1,26 +1,38 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 5 ]; then
-    echo "usage: $0 PUBLIC_IP PUBLIC_PORT LOCAL_PORT TARGET_IP TARGET_PORT" >&2
+if [ "$#" -ne 3 ]; then
+    echo "usage: $0 PUBLIC_IP PUBLIC_PORT LOCAL_PORT" >&2
     exit 2
 fi
 
-public_port=$2
-case "$public_port" in
-    ''|*[!0-9]*)
-        echo "invalid public port: $public_port" >&2
+validate_port() {
+    case "$1" in
+        ''|*[!0-9]*)
+            echo "invalid port: $1" >&2
+            exit 2
+            ;;
+    esac
+    if [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
+        echo "port must be between 1 and 65535: $1" >&2
         exit 2
-        ;;
-esac
-if [ "$public_port" -lt 1 ] || [ "$public_port" -gt 65535 ]; then
-    echo "public port must be between 1 and 65535" >&2
-    exit 2
-fi
+    fi
+}
+
+public_port=$2
+listen_port=${QBITTORRENT_LISTEN_PORT:-$public_port}
+announce_port=${QBITTORRENT_ANNOUNCE_PORT:-}
+validate_port "$public_port"
+validate_port "$listen_port"
 
 base_url=${QBITTORRENT_URL:-http://192.168.2.10:8080}
 base_url=${base_url%/}
-json=$(printf '{"listen_port":%s}' "$public_port")
+if [ -n "$announce_port" ]; then
+    validate_port "$announce_port"
+    json=$(printf '{"listen_port":%s,"announce_port":%s}' "$listen_port" "$announce_port")
+else
+    json=$(printf '{"listen_port":%s}' "$listen_port")
+fi
 
 status=$(curl --fail --silent --show-error --max-time 10 \
     -X POST \

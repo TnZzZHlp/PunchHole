@@ -95,7 +95,9 @@ fn consumes_informational_response_before_final_response() {
             .unwrap();
     });
 
-    drop(connect_http(0, address).unwrap());
+    let stream = connect_http(0, address).unwrap();
+    assert_ne!(stream.local_addr().unwrap().port(), 0);
+    drop(stream);
     server.join().unwrap();
 }
 

@@ -1,9 +1,9 @@
 # PunchHole
 
-PunchHole keeps direct IPv4 TCP mappings open from a Linux or OpenWrt device
-behind a full-cone (NAT1) router. One process can maintain multiple independent
-mappings; each mapping has its own source/listen port, target, and notification
-script.
+PunchHole maintains direct IPv4 TCP mappings behind a full-cone/NAT1 router.
+It reuses one OS-selected local port for an HTTP keepalive connection and TCP
+STUN, then invokes a script to install the data-plane forwarding. PunchHole
+does not proxy payload traffic.
 
 ## Build and checks
 
@@ -14,25 +14,9 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-## Logging
+## Configuration
 
-PunchHole writes structured tracing output at INFO level by default. Set
-`RUST_LOG=debug` for more detailed output, for example:
-
-```sh
-RUST_LOG=debug PunchHole --config config.json
-```
-
-## Configuration and CLI
-
-The process requires one existing HTTP service and one existing STUN service.
-The STUN service must accept STUN over TCP and return an IPv4
-`XOR-MAPPED-ADDRESS` in a Binding Success Response; a UDP-only STUN service
-will not work. The HTTP service must return a valid persistent response:
-HTTP/1.0 with `Connection: keep-alive`, or HTTP/1.1 without
-`Connection: close`; PunchHole sends periodic `HEAD /` requests.
-
-Configuration can be supplied as a strict JSON file:
+PunchHole accepts only a strict JSON configuration file:
 
 ```json
 {
@@ -40,9 +24,7 @@ Configuration can be supplied as a strict JSON file:
   "stun": "198.51.100.20:3478",
   "mappings": [
     {
-      "local_port": 10001,
-      "target": "192.168.2.10:0",
-      "script": "/absolute/path/PunchHole/scripts/qbittorrent-set-port.sh"
+      "script": "/absolute/path/PunchHole/scripts/openwrt-qbittorrent-nft.sh"
     }
   ]
 }
@@ -54,88 +36,99 @@ Start it with:
 PunchHole --config config.json
 ```
 
-The JSON schema has exactly the `http`, `stun`, and `mappings` fields shown
-above. Each mapping has a numeric `local_port`, a `target`, and a `script`;
-`local` is accepted as an alias for `local_port`. JSON fields and value types
-are strict, unknown fields are rejected, and script paths must be absolute. A
-target port of `0` is dynamic: after STUN reports the public port, the mapping
-forwards to `IPv4_ADDRESS:<public-port>`. Fixed numeric target ports continue
-to work normally.
+The top-level fields are exactly `http`, `stun`, and `mappings`. Each mapping
+contains only an absolute `script` path. Unknown fields are rejected.
 
-The preserved direct CLI form uses repeatable `--mapping` options. Its fields
-are:
+HTTP and STUN endpoints may use an IPv4 literal or DNS hostname with a port.
+Hostnames resolve once at configuration load to the first IPv4 result. The
+STUN endpoint must support STUN over TCP and return an IPv4
+`XOR-MAPPED-ADDRESS`; UDP-only STUN is insufficient. The HTTP endpoint must
+return a persistent HTTP/1.0 or HTTP/1.1 response to periodic `HEAD /` requests.
 
-```text
-local=PRIVATE_PORT,target=HOST_OR_IPV4:PORT,script=ABSOLUTE_PATH
-```
+Each mapping obtains a random local port from the operating system when its
+first HTTP connection succeeds. That port remains fixed through retries until
+PunchHole restarts. Linux/OpenWrt must support `SO_REUSEPORT` so HTTP and STUN
+can share it.
 
-Generic example:
+## Notification script
 
-```sh
-./target/release/PunchHole \
-  --http 198.51.100.10:80 \
-  --stun 198.51.100.20:3478 \
-  --mapping 'local=10001,target=192.168.1.20:22,script=/opt/app1.sh' \
-  --mapping 'local=10002,target=127.0.0.1:8080,script=/opt/app2.sh'
-```
-
-The addresses above use TEST-NET documentation ranges and the script paths
-are placeholders; replace all of them with real values. HTTP, STUN, and target
-endpoints may use an IPv4 literal or DNS hostname followed by a port. Hostnames
-are resolved once when configuration is loaded, and the first IPv4 result is
-used; restart PunchHole to pick up DNS changes. IPv6-only names are rejected.
-Local ports must be unique and non-zero. The configured local port is used for
-the persistent HTTP connection, the TCP STUN Binding request, and the local
-TCP listener. Linux/OpenWrt must support `SO_REUSEPORT` for this same-port
-setup.
-
-When a public endpoint is first established or changes after a retry, PunchHole
-runs the mapping script without a shell. Script paths must be absolute; missing
-or non-executable scripts are reported when invoked. Arguments are passed in
-this order:
+When STUN first reports a public endpoint or that endpoint changes, PunchHole
+executes the mapping script directly without a shell. It passes exactly three
+separate arguments:
 
 ```text
-script PUBLIC_IP PUBLIC_PORT LOCAL_PORT TARGET_IP TARGET_PORT
+script PUBLIC_IP PUBLIC_PORT LOCAL_PORT
 ```
 
-For a dynamic target, `TARGET_PORT` is the resolved public port. Fixed-target
-notifications run asynchronously and coalesce pending updates. Dynamic-target
-notifications finish before the listener accepts clients; a failed or timed-out
-dynamic notification causes that mapping to retry.
+The script must establish forwarding before exiting. A missing, failed, or
+timed-out script causes the mapping to retry. Target selection belongs entirely
+to the script and is not part of PunchHole configuration.
 
-## qBittorrent TCP mapping
+## OpenWrt qBittorrent mapping
 
-`192.168.2.10:8080` is the qBittorrent WebUI/API endpoint, not the BitTorrent
-peer port. The included `scripts/qbittorrent-set-port.sh` calls
-`/api/v2/app/setPreferences` and changes qBittorrent's `listen_port` to the
-current public mapped port. It defaults to the user's LAN endpoint and can be
-overridden with `QBITTORRENT_URL`.
+`scripts/openwrt-qbittorrent-nft.sh` combines two helpers:
 
-Example:
+1. `qbittorrent-set-port.sh` sets qBittorrent `listen_port` and `announce_port`
+   to `PUBLIC_PORT`.
+2. `openwrt-nft-forward.sh` maps random `LOCAL_PORT` to the chosen target with
+   kernel nftables DNAT.
+
+The helpers use these environment variables:
+
+```text
+QBITTORRENT_URL          default: http://192.168.2.10:8080
+PUNCHHOLE_TARGET_IP      default: 192.168.2.10
+PUNCHHOLE_TARGET_PORT    default: PUBLIC_PORT
+PUNCHHOLE_WAN_INTERFACE default: pppoe-wan
+```
+
+Use a small wrapper per qBittorrent instance to select its WebAPI and target.
+For example:
 
 ```sh
-./target/release/PunchHole \
-  --http 198.51.100.10:80 \
-  --stun 198.51.100.20:3478 \
-  --mapping 'local=10001,target=192.168.2.10:0,script=/absolute/path/PunchHole/scripts/qbittorrent-set-port.sh'
+#!/bin/sh
+export QBITTORRENT_URL=http://192.168.2.10:8080
+export PUNCHHOLE_TARGET_IP=192.168.2.10
+exec /usr/local/lib/punchhole/openwrt-qbittorrent-nft.sh "$@"
 ```
 
-This assumes the qBittorrent WebAPI allows unauthenticated access from the LAN
-and that `curl` is installed on the device. The dynamic target is applied only
-after the script completes, so incoming TCP traffic is forwarded to the port
-qBittorrent just selected. This implementation covers BitTorrent TCP only; UDP
-and uTP traffic are not forwarded.
+Run the nft helper with `--init` before starting PunchHole to remove stale
+mappings:
 
-## Scope and limitations
+```sh
+/usr/local/lib/punchhole/openwrt-nft-forward.sh --init
+```
 
-This is direct-only hole punching. It relies on IPv4 TCP behavior of a
-full-cone/NAT1 device and does not promise connectivity through ordinary,
-restricted, symmetric, or carrier-grade NAT. It does not implement TURN,
-relays, an HTTP server, or a STUN server. Clients must connect to the public
-IPv4:port reported by STUN.
+The OpenWrt helper requires `nft`, `flock`, and root or `CAP_NET_ADMIN`. It
+clears incoming forged CS1 marks and marks only PunchHole DNAT flows as CS1. If
+the target host uses a default-deny input firewall, accept marked TCP packets
+on its LAN interface before the final drop rule, for example:
 
-**Security warning:** direct mappings have no built-in client authentication or
-ACL. Any client that can reach a public mapping and is allowed by the NAT is
-forwarded to the configured target. The qB LAN no-auth setting is only safe on a
-trusted LAN; use an authenticated target service and appropriate host/firewall
-controls for any exposed service.
+```nft
+ iifname "eno1" ip dscp cs1 ip protocol tcp accept
+```
+
+The qBittorrent helper requires `curl` and assumes its LAN WebAPI permits the
+request. The included path forwards TCP only; UDP and uTP are outside scope.
+
+## Logging
+
+PunchHole writes structured tracing output at INFO level by default:
+
+```sh
+RUST_LOG=debug PunchHole --config config.json
+```
+
+A `mapping ready` record contains the randomly selected local port and public
+endpoint.
+
+## Scope and security
+
+This is direct-only hole punching for full-cone/NAT1 IPv4 behavior. It does not
+implement TURN, relay, UDP forwarding, authentication, ACLs, or CGNAT support.
+Upstream carrier NAT may still prevent arbitrary-source connectivity.
+
+Script-installed mappings expose their target without application-level access
+control. Keep configuration and privileged scripts root-owned, protect the
+qBittorrent WebAPI on a trusted LAN, and apply firewall policy appropriate to
+the exposed service.

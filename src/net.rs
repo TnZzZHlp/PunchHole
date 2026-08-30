@@ -16,39 +16,6 @@ pub fn new_bound_socket(local_port: u16) -> io::Result<Socket> {
     Ok(socket)
 }
 
-pub fn is_retryable_accept_error(error: &io::Error) -> bool {
-    if matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock
-            | io::ErrorKind::Interrupted
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset
-    ) {
-        return true;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        const LINUX_TRANSIENT_ACCEPT_ERRNOS: &[i32] = &[
-            libc::ENETDOWN,
-            libc::EPROTO,
-            libc::ENOPROTOOPT,
-            libc::EHOSTDOWN,
-            libc::ENONET,
-            libc::EHOSTUNREACH,
-            libc::EOPNOTSUPP,
-            libc::ENETUNREACH,
-        ];
-        error
-            .raw_os_error()
-            .is_some_and(|errno| LINUX_TRANSIENT_ACCEPT_ERRNOS.contains(&errno))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
-}
-
 pub fn connect_from_local(local_port: u16, remote: SocketAddrV4) -> io::Result<TcpStream> {
     let socket = new_bound_socket(local_port)?;
     socket.set_keepalive(true)?;
