@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddrV4, TcpStream};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::net::connect_from_local;
@@ -277,25 +277,22 @@ pub fn connect_http(local_port: u16, http: SocketAddrV4) -> io::Result<TcpStream
     Ok(stream)
 }
 
-pub fn http_keepalive_loop(
+pub fn http_keepalive_loop<F>(
     mut stream: TcpStream,
     http: SocketAddrV4,
-    stop_receiver: &Receiver<()>,
-) -> io::Result<()> {
+    interval: Duration,
+    mut periodic_check: F,
+) -> io::Result<()>
+where
+    F: FnMut() -> io::Result<()>,
+{
     stream.set_read_timeout(Some(HTTP_RESPONSE_TIMEOUT))?;
     stream.set_write_timeout(Some(HTTP_WRITE_TIMEOUT))?;
-    let mut next_request = Instant::now() + HTTP_KEEPALIVE_INTERVAL;
 
     loop {
-        let now = Instant::now();
-        let wait = next_request.saturating_duration_since(now);
-        match stop_receiver.recv_timeout(wait) {
-            Ok(()) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
-            Err(RecvTimeoutError::Timeout) => {
-                send_http_head(&mut stream, http)?;
-                read_http_response_headers(&mut stream)?;
-                next_request = Instant::now() + HTTP_KEEPALIVE_INTERVAL;
-            }
-        }
+        thread::sleep(interval);
+        send_http_head(&mut stream, http)?;
+        read_http_response_headers(&mut stream)?;
+        periodic_check()?;
     }
 }

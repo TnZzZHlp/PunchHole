@@ -41,9 +41,10 @@ contains only an absolute `script` path. Unknown fields are rejected.
 
 HTTP and STUN endpoints may use an IPv4 literal or DNS hostname with a port.
 Hostnames resolve once at configuration load to the first IPv4 result. The
-STUN endpoint must support STUN over TCP and return an IPv4
-`XOR-MAPPED-ADDRESS`; UDP-only STUN is insufficient. The HTTP endpoint must
-return a persistent HTTP/1.0 or HTTP/1.1 response to periodic `HEAD /` requests.
+STUN endpoint must support repeated STUN Binding requests over one persistent
+TCP connection and return an IPv4 `XOR-MAPPED-ADDRESS`; UDP-only STUN is
+insufficient. The HTTP endpoint must return a persistent HTTP/1.0 or HTTP/1.1
+response to periodic `HEAD /` requests.
 
 Each mapping obtains a random local port from the operating system when its
 first HTTP connection succeeds. That port remains fixed through retries until
@@ -53,8 +54,10 @@ can share it.
 ## Notification script
 
 When STUN first reports a public endpoint or that endpoint changes, PunchHole
-executes the mapping script directly without a shell. It passes exactly three
-separate arguments:
+executes the mapping script directly without a shell. After setup, PunchHole
+reuses its TCP STUN connection for a check with each 15-second HTTP keepalive
+and reruns the script when the public IP or port changes. It passes exactly
+three separate arguments:
 
 ```text
 script PUBLIC_IP PUBLIC_PORT LOCAL_PORT

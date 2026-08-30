@@ -10,14 +10,25 @@ pub const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
 pub const STUN_BINDING_SUCCESS: u16 = 0x0101;
 pub const XOR_MAPPED_ADDRESS: u16 = 0x0020;
 
-pub fn request_stun(local_port: u16, stun: SocketAddrV4) -> io::Result<SocketAddrV4> {
-    let mut stream = connect_from_local(local_port, stun)?;
-    stream.set_read_timeout(Some(STUN_TIMEOUT))?;
-    stream.set_write_timeout(Some(STUN_TIMEOUT))?;
-    let transaction_id = next_transaction_id();
-    stream.write_all(&stun_binding_request(transaction_id))?;
-    stream.flush()?;
-    read_stun_response(&mut stream, transaction_id)
+pub struct StunConnection {
+    stream: TcpStream,
+}
+
+impl StunConnection {
+    pub fn connect(local_port: u16, stun: SocketAddrV4) -> io::Result<Self> {
+        let stream = connect_from_local(local_port, stun)?;
+        stream.set_read_timeout(Some(STUN_TIMEOUT))?;
+        stream.set_write_timeout(Some(STUN_TIMEOUT))?;
+        Ok(Self { stream })
+    }
+
+    pub fn request(&mut self) -> io::Result<SocketAddrV4> {
+        let transaction_id = next_transaction_id();
+        self.stream
+            .write_all(&stun_binding_request(transaction_id))?;
+        self.stream.flush()?;
+        read_stun_response(&mut self.stream, transaction_id)
+    }
 }
 
 fn next_transaction_id() -> [u8; 12] {

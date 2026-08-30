@@ -16,14 +16,17 @@ use clap::{CommandFactory, Parser};
 
 pub use config::{Config, Mapping, load_json_config, parse_ipv4_endpoint};
 #[doc(hidden)]
-pub use http::{connect_http, validate_http_response};
+pub use http::{connect_http, http_keepalive_loop, validate_http_response};
+#[doc(hidden)]
+pub use mapping::notify_if_public_changed;
 #[doc(hidden)]
 pub use net::new_bound_socket;
 #[doc(hidden)]
 pub use notify::script_arguments;
 #[doc(hidden)]
 pub use stun::{
-    STUN_BINDING_SUCCESS, STUN_MAGIC_COOKIE, XOR_MAPPED_ADDRESS, parse_xor_mapped_address,
+    STUN_BINDING_SUCCESS, STUN_MAGIC_COOKIE, StunConnection, XOR_MAPPED_ADDRESS,
+    parse_xor_mapped_address,
 };
 
 fn init_tracing() {

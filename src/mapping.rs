@@ -1,16 +1,15 @@
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4, TcpStream};
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, Mapping};
-use crate::http::{connect_http, http_keepalive_loop};
+use crate::http::{HTTP_KEEPALIVE_INTERVAL, connect_http, http_keepalive_loop};
 use crate::notify::{run_notification_script, script_arguments};
-use crate::stun::request_stun;
+use crate::stun::StunConnection;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -128,39 +127,65 @@ fn run_mapping_once(
     };
 
     debug!(local_port, stun = %stun, "starting STUN setup");
-    let public = request_stun(local_port, stun)
+    let mut stun_connection = StunConnection::connect(local_port, stun)
+        .map_err(|error| io::Error::new(error.kind(), format!("STUN setup failed: {error}")))?;
+    let public = stun_connection
+        .request()
         .map_err(|error| io::Error::new(error.kind(), format!("STUN setup failed: {error}")))?;
 
-    if *last_public != Some(public) {
-        let arguments = script_arguments(public, local_port);
-        run_notification_script(&mapping.script, &arguments, local_port)
-            .map_err(|error| io::Error::other(format!("mapping notification failed: {error}")))?;
-        *last_public = Some(public);
+    notify_if_public_changed(&mapping.script, local_port, public, last_public)?;
+
+    maintain_mapping(
+        http_stream,
+        http,
+        stun_connection,
+        local_port,
+        public,
+        &mapping.script,
+        last_public,
+    )
+}
+
+#[doc(hidden)]
+pub fn notify_if_public_changed(
+    script: &std::path::Path,
+    local_port: u16,
+    public: SocketAddrV4,
+    last_public: &mut Option<SocketAddrV4>,
+) -> io::Result<()> {
+    if *last_public == Some(public) {
+        return Ok(());
     }
 
-    maintain_mapping(http_stream, http, local_port, public, &mapping.script)
+    let arguments = script_arguments(public, local_port);
+    run_notification_script(script, &arguments, local_port)
+        .map_err(|error| io::Error::other(format!("mapping notification failed: {error}")))?;
+    *last_public = Some(public);
+    Ok(())
+}
+
+fn check_mapping(
+    stun: &mut StunConnection,
+    local_port: u16,
+    script: &std::path::Path,
+    last_public: &mut Option<SocketAddrV4>,
+) -> io::Result<()> {
+    debug!(local_port, "starting periodic STUN check");
+    let public = stun.request().map_err(|error| {
+        io::Error::new(error.kind(), format!("periodic STUN check failed: {error}"))
+    })?;
+    notify_if_public_changed(script, local_port, public, last_public)
 }
 
 fn maintain_mapping(
     http_stream: TcpStream,
     http: SocketAddrV4,
+    mut stun: StunConnection,
     local_port: u16,
     public: SocketAddrV4,
     script: &std::path::Path,
+    last_public: &mut Option<SocketAddrV4>,
 ) -> io::Result<()> {
-    let (stop_sender, stop_receiver) = mpsc::channel();
-    let (failure_sender, failure_receiver) = mpsc::channel();
-    let keepalive = thread::Builder::new()
-        .name(format!("keepalive-{local_port}"))
-        .spawn(move || {
-            if let Err(error) = http_keepalive_loop(http_stream, http, &stop_receiver) {
-                let _ = failure_sender.send(error.to_string());
-            }
-        })
-        .map_err(|error| {
-            io::Error::other(format!("could not start HTTP keepalive worker: {error}"))
-        })?;
-
     info!(
         local_port,
         public = %public,
@@ -168,13 +193,7 @@ fn maintain_mapping(
         "mapping ready"
     );
 
-    let error = failure_receiver.recv().map_or_else(
-        |_| "HTTP keepalive stopped".to_string(),
-        |error| format!("HTTP keepalive failed: {error}"),
-    );
-    let result = Err(io::Error::other(error));
-
-    let _ = stop_sender.send(());
-    let _ = keepalive.join();
-    result
+    http_keepalive_loop(http_stream, http, HTTP_KEEPALIVE_INTERVAL, || {
+        check_mapping(&mut stun, local_port, script, last_public)
+    })
 }
